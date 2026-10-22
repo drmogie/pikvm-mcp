@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "pikvm": {
+      "command": "uvx",
+      "args": ["--from", "D:\\GitHub-Projects\\pikvm-mcp", "pikvm-mcp"],
+      "env": {
+        "PIKVM_SERVERS": "pi-kvm01,thewall-pikvm,thevm01-pikvm,thevm02-pikvm",
+        "PIKVM_URL_PI_KVM01": "https://172.16.10.29",
+        "PIKVM_PASSWORD_PI_KVM01": "PUT-WEB-PASSWORD-HERE",
+        "PIKVM_SSH_PASSWORD_PI_KVM01": "PUT-ROOT-PASSWORD-HERE",
+        "PIKVM_URL_THEWALL_PIKVM": "https://172.16.10.30",
+        "PIKVM_PASSWORD_THEWALL_PIKVM": "PUT-WEB-PASSWORD-HERE",
+        "PIKVM_SSH_PASSWORD_THEWALL_PIKVM": "PUT-ROOT-PASSWORD-HERE",
+        "PIKVM_URL_THEVM01_PIKVM": "https://172.16.10.81",
+        "PIKVM_PASSWORD_THEVM01_PIKVM": "PUT-WEB-PASSWORD-HERE",
+        "PIKVM_SSH_PASSWORD_THEVM01_PIKVM": "PUT-ROOT-PASSWORD-HERE",
+        "PIKVM_URL_THEVM02_PIKVM": "https://172.16.10.82",
+        "PIKVM_PASSWORD_THEVM02_PIKVM": "PUT-WEB-PASSWORD-HERE",
+        "PIKVM_SSH_PASSWORD_THEVM02_PIKVM": "PUT-ROOT-PASSWORD-HERE"
+      }
+    }
+  }
+}

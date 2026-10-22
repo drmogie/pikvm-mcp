@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pikvm-mcp"
+version = "2026.10.22.1"
+description = "MCP tool that lets Claude look at and configure PiKVMs, through the web API and SSH."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "drmogie" }]
+dependencies = ["mcp>=1.2,<2", "paramiko>=3"]
+
+[project.scripts]
+pikvm-mcp = "pikvm_mcp:main"
+
+[tool.setuptools]
+packages = ["pikvm_mcp"]
