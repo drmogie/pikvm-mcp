@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.10.22.03
+
+- Screenshots: if the PiKVM video stream is idle (HTTP 503), the tool tries again twice. If it is still down, it says to open the PiKVM web page or a VNC viewer first. The stream usually only runs while someone is watching.
+- More shell commands now count as read-only and run without a confirm: `cat /etc/fstab`, `find` (without `-exec`, `-delete` and similar), `pgrep`, `ps`, `findmnt`, `du`, `stat`, `mountpoint`, `showmount`, `nfsstat`, and `runuser -u <user> -- <read command>` for a user other than root.
+- `/etc/fstab` can be shown with `cat`, but it is still not allowed in the config read and write tools.
+
 ## 2026.10.22.02
 
 - Fix: read-only shell commands with a `|` inside quotes, like `grep "a|b"`, were wrongly treated as changes. Pipes are now read properly.

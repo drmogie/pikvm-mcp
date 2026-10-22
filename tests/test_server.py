@@ -24,6 +24,9 @@ class H(BaseHTTPRequestHandler):
         ok = (sent[:len(good)] == good and len(sent) == len(good) + 6 and sent[len(good):].isdigit()) if getattr(self.server, "expect_totp", False) else sent == good
         if not ok:
             self.send_response(401); self.end_headers(); self.wfile.write(b'{"ok":false,"result":{"error":"ForbiddenError"}}'); return
+        if u.path == "/api/streamer/snapshot" and getattr(self.server, "snap503", 0) > 0:
+            self.server.snap503 -= 1
+            self.send_response(503); self.end_headers(); self.wfile.write(b'{"ok":false,"result":{"error":"UnavailableError"}}'); return
         if u.path == "/api/streamer/snapshot":
             self.send_response(200); self.send_header("Content-Type", "image/jpeg"); self.end_headers(); self.wfile.write(b"\xff\xd8JPEG"); return
         if u.path == "/api/streamer/ocr":
@@ -67,7 +70,7 @@ for cmd, want in [
     ("ip -br a", "read"), ("ls /etc/kvmd", "read"),
     ("cat /etc/kvmd/htpasswd", "blocked"), ("cat /etc/shadow", "blocked"),
     ("cat /etc/kvmd/override.yaml; rm -rf /", "destructive"),
-    ("cat /etc/kvmd/../shadow", "blocked"), ("cat /etc/fstab", "change"),
+    ("cat /etc/kvmd/../shadow", "blocked"), ("cat /etc/fstab", "read"),
     ("reboot", "destructive"), ("rm -rf /var", "destructive"), ("pacman -Syu", "destructive"),
     ("pikvm-update", "destructive"), ("systemctl stop kvmd", "destructive"),
     ("systemctl restart kvmd-vnc", "change"), ("date -s 2020-01-01", "destructive"),
@@ -85,6 +88,26 @@ check("config path ok", s.config_path_ok("/etc/kvmd/override.yaml") == "")
 check("config path secret", s.config_path_ok("/etc/kvmd/htpasswd") != "")
 check("config path escape", s.config_path_ok("/etc/kvmd/../shadow") != "")
 check("config path other", s.config_path_ok("/etc/fstab") != "")
+
+# ---- more read-only commands (2026.10.22.03)
+for cmd, want in [
+    ("cat /etc/fstab", "read"), ("cat /etc/fstab | grep OSISO", "read"),
+    ("find /etc/kvmd -newer /etc/hostname -type f", "read"), ("find /etc -name x -exec cat {} +", "change"),
+    ("find /tmp -delete", "change"), ("find / -exec rm {} ;", "destructive"),
+    ("pgrep -a pacman", "read"), ("pgrep -a pacman | tail -3", "read"),
+    ("ps aux | grep pacman", "read"), ("findmnt -T /var/lib/pacman", "read"),
+    ("du -sh /var/lib/kvmd/msd", "read"), ("stat /etc/fstab", "read"),
+    ("showmount -e 172.16.10.11", "read"), ("mountpoint -q /var/lib/kvmd/msd/NFS_Primary", "read"),
+    ("runuser -u kvmd -- ls /var/lib/kvmd/msd/NFS_Primary", "read"),
+    ("runuser -u kvmd ls /tmp", "read"), ("runuser -u root -- ls /tmp", "change"),
+    ("runuser -u kvmd -- rm /tmp/x", "destructive"), ("runuser -u kvmd -- sh -c id", "destructive"),
+    ("runuser -u kvmd -- touch /tmp/x", "change"), ("runuser -u kvmd -- cat /etc/kvmd/htpasswd", "blocked"),
+    ("runuser -u kvmd -- runuser -u root -- ls", "change"), ("runuser", "change"),
+    ("stat /etc/kvmd/htpasswd", "blocked"),
+]:
+    got = s.classify_ssh(cmd)
+    check(f"more read {cmd!r} -> {want}" + ("" if got == want else f" (got {got})"), got == want)
+check("fstab not allowed for config tools", s.config_path_ok("/etc/fstab") != "")
 
 # ---- pipelines and 2FA
 for cmd, want in [
@@ -138,6 +161,13 @@ check("msd select params", SEEN[-1][2]["image"] == ["a.iso"] and SEEN[-1][2]["cd
 img = s.pikvm_snapshot()
 check("snapshot returns image", getattr(img, "data", b"").startswith(b"\xff\xd8"))
 check("snapshot ocr", "login" in s.pikvm_snapshot(ocr=True))
+s.STREAMER_RETRY_WAITS = (0, 0, 0)
+a.snap503 = 2
+check("snapshot retries after 503", getattr(s.pikvm_snapshot(), "data", b"").startswith(b"\xff\xd8"))
+n = len(SEEN); a.snap503 = 9
+r = s.pikvm_snapshot()
+check("snapshot gives idle hint after 3 tries", isinstance(r, str) and "not running" in r and "web page" in r and len(SEEN) - n == 3)
+a.snap503 = 0
 bad = os.environ["PIKVM_PASSWORD"]; os.environ["PIKVM_PASSWORD"] = "s3cretpw"
 r = s.pikvm_info(); check("401 hint, no password leak", "HTTP 401" in r and "s3cretpw" not in r)
 os.environ["PIKVM_PASSWORD"] = bad

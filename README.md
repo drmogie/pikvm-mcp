@@ -32,7 +32,7 @@ App side:
 - `pikvm_info` shows version, hardware and health.
 - `pikvm_status` shows power, screen, keyboard and mouse, and virtual drive in one go.
 - `pikvm_power` controls ATX power.
-- `pikvm_snapshot` takes a picture of the target screen. Optional OCR.
+- `pikvm_snapshot` takes a picture of the target screen. Optional OCR. The PiKVM video stream usually only runs while someone is watching, so if it fails, open the PiKVM web page or VNC first.
 - `pikvm_type` types text or a shortcut on the target.
 - `pikvm_msd` manages the virtual drive. Select, connect, download an ISO from a URL, remove.
 - `pikvm_log` shows the kvmd log.

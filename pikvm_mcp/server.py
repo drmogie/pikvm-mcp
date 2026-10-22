@@ -56,7 +56,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP, Image
 
-__version__ = "2026.10.22.02"
+__version__ = "2026.10.22.03"
 
 mcp = FastMCP("pikvm")
 
@@ -95,7 +95,10 @@ SECRET_RE = re.compile(
 
 SSH_META_RE = re.compile(r"`|\$\(|\n|\r")  # run inside quotes too, so always refused for the read level
 SSH_FILTERS = {"head", "tail", "grep", "wc", "sort", "uniq", "cut"}
-SSH_PLAIN_READ = {"uptime", "df", "free", "uname", "lsblk", "lsusb", "id", "whoami", "ls"}
+SSH_PLAIN_READ = {"uptime", "df", "free", "uname", "lsblk", "lsusb", "id", "whoami", "ls",
+                  "pgrep", "ps", "findmnt", "du", "stat", "mountpoint", "showmount", "nfsstat"}
+# find can run or delete things with these options, so find with any of them is not a read.
+FIND_BAD = {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf", "-fls"}
 SSH_DESTRUCTIVE_RE = re.compile(
     r"(^|[\s|;&(`$])(rm|rmdir|mv|cp|dd|mkfs\S*|fdisk|parted|reboot|poweroff|shutdown|halt|"
     r"passwd|kvmd-htpasswd|kvmd-totp|pikvm-update|pacman|pip|pip3|swapoff|iptables|nft|"
@@ -104,6 +107,8 @@ SSH_DESTRUCTIVE_RE = re.compile(
     r"systemctl\s+(stop|disable|mask|poweroff|reboot|halt|kexec))([\s;&)|`]|$)")
 CAT_OK_PREFIXES = ("/etc/kvmd/", "/proc/", "/sys/class/thermal/")
 CAT_OK_FILES = {"/boot/config.txt", "/boot/cmdline.txt", "/etc/os-release", "/etc/hostname"}
+# Fine to show with cat, but NOT allowed in pikvm_config_read or pikvm_config_write.
+CAT_READ_ONLY_FILES = {"/etc/fstab"}
 SYSTEMCTL_READ = {"status", "is-active", "is-enabled", "is-failed", "list-units",
                   "list-unit-files", "list-timers", "show", "cat"}
 VCGENCMD_READ = {"measure_temp", "get_throttled", "measure_volts", "get_config", "version"}
@@ -130,9 +135,20 @@ def _argv_is_read(argv: list[str]) -> bool:
             clean = posixpath.normpath(a)
             if ".." in a or clean != a.rstrip("/"):
                 return False
-            if clean not in CAT_OK_FILES and not clean.startswith(CAT_OK_PREFIXES):
+            if (clean not in CAT_OK_FILES and clean not in CAT_READ_ONLY_FILES
+                    and not clean.startswith(CAT_OK_PREFIXES)):
                 return False
         return True
+    if prog == "find":
+        return not any(a in FIND_BAD for a in args)
+    if prog == "runuser":
+        # runuser -u USER [--] COMMAND: a read only when USER is not root and COMMAND is a read.
+        if len(args) >= 3 and args[0] == "-u" and args[1] not in ("root", "0"):
+            inner = args[2:]
+            if inner[0] == "--":
+                inner = inner[1:]
+            return bool(inner) and inner[0] != "runuser" and _argv_is_read(inner)
+        return False
     if prog == "systemctl":
         sub = [a for a in args if not a.startswith("-")]
         return bool(sub) and sub[0] in SYSTEMCTL_READ
@@ -384,6 +400,24 @@ def _request(method: str, path: str, params: dict[str, Any] | None = None,
         msg = res.get("error_msg") or res.get("error") or doc
         return {"ok": False, "error": _scrub(f"PiKVM says: {msg}", password, login_password, totp_secret)}
     return {"ok": True, "data": doc.get("result", doc) if isinstance(doc, dict) else doc}
+
+
+STREAMER_RETRY_WAITS = (0, 2, 3)  # seconds to wait before each try. Tests set it to zeros.
+STREAMER_IDLE_HINT = (
+    "The PiKVM video stream is not running. It usually only runs while someone is watching. "
+    "Open the PiKVM web page or a VNC viewer on it, wait a few seconds, then try again.")
+
+
+def _streamer_get(path: str, params: dict[str, Any] | None, server: str) -> dict[str, Any]:
+    """GET from the video streamer. A 503 means it is idle or still starting, so try again twice."""
+    result: dict[str, Any] = {}
+    for wait in STREAMER_RETRY_WAITS:
+        if wait:
+            time.sleep(wait)
+        result = _request("GET", path, params, server, raw=True, timeout=45)
+        if result.get("ok") or "HTTP 503" not in result.get("error", ""):
+            return result
+    return {"ok": False, "error": STREAMER_IDLE_HINT}
 
 
 def _render(result: dict[str, Any], max_chars: int) -> str:
@@ -789,21 +823,20 @@ def pikvm_snapshot(
     if err or len(names) != 1:
         return "ERROR: " + (err or "Pick one PiKVM for a screenshot.")
     name = names[0]
-    result = _request("GET", "/api/streamer/snapshot",
-                      {"allow_offline": False, "preview": 1 if max_width else 0,
-                       "preview_max_width": max_width or None, "preview_quality": 80},
-                      name, raw=True, timeout=45)
+    result = _streamer_get("/api/streamer/snapshot",
+                           {"allow_offline": False, "preview": 1 if max_width else 0,
+                            "preview_max_width": max_width or None, "preview_quality": 80},
+                           name)
     if not result.get("ok"):
         return "ERROR: " + result.get("error", "no picture")
     data = result["bytes"]
     if save:
         label = "" if name == DEFAULT_SERVER else f"{_key(name).lower()}-"
-        full = _request("GET", "/api/streamer/snapshot", {"allow_offline": False}, name,
-                        raw=True, timeout=45)
+        full = _streamer_get("/api/streamer/snapshot", {"allow_offline": False}, name)
         target = _download_dir() / f"{int(time.time())}-{label}screen.jpg"
         target.write_bytes(full["bytes"] if full.get("ok") else data)
     if ocr:
-        text = _request("GET", "/api/streamer/ocr", None, name, raw=True, timeout=45)
+        text = _streamer_get("/api/streamer/ocr", None, name)
         if text.get("ok"):
             return f"Screen text (OCR):\n{text['bytes'].decode('utf-8', 'replace')[:6000]}"
     return Image(data=data, format="jpeg")
