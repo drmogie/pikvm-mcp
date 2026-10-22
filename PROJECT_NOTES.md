@@ -17,3 +17,13 @@
 - Lesson repeated: test the real `uvx --from <folder>` launch. A stripped environment makes uvx fail to fetch packages, which looks like "Connection closed". Pass the full environment in the test client.
 - Tested: fake PiKVM web server and fake SSH (tests/), plus real stdio launch via uvx (15 tools listed). NOT tested on a real PiKVM or on Windows.
 - GitHub repo: NOT created yet. Waiting for Mogie's approval to commit, push and release.
+
+## 2026-10-22: first live test on pi-kvm01 (2026.10.22.02)
+
+- SSH side worked first try (system info, config read, kvmd log path).
+- Web API said 403 Forbidden. Cause: pi-kvm01 has /etc/kvmd/totp.secret, so 2FA is on and the plain password is refused. PiKVM sends 403 here, not 401.
+- Fix: PIKVM_TOTP_SECRET(_<NAME>) makes the 6 digit code in the tool (stdlib HMAC, tested against the RFC 6238 vector). The tool still never reads totp.secret; Mogie pastes it into the desktop config himself.
+- Bug found by the live test: the read-level check split pipelines on every `|`, even inside quotes, so `grep -iE "a|b"` was treated as a change. Now uses shlex with punctuation tokens.
+- Tightened the risky-command regex to catch `(reboot)`, `;reboot`, and backticks.
+- pi-kvm01 has two addresses: eth0 172.16.10.113 and wlan0 172.16.10.29 (the one in the config).
+- Lesson: unit tests with a fake server do not catch real-device auth rules (2FA). Test the real device early.

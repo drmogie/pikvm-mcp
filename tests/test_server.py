@@ -19,7 +19,10 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else b""
         SEEN.append((method, u.path, parse_qs(u.query), body, dict(self.headers)))
-        if self.headers.get("X-KVMD-Passwd") != "pw" + self.server.tag:
+        sent = self.headers.get("X-KVMD-Passwd") or ""
+        good = ("pw" + self.server.tag)
+        ok = (sent[:len(good)] == good and len(sent) == len(good) + 6 and sent[len(good):].isdigit()) if getattr(self.server, "expect_totp", False) else sent == good
+        if not ok:
             self.send_response(401); self.end_headers(); self.wfile.write(b'{"ok":false,"result":{"error":"ForbiddenError"}}'); return
         if u.path == "/api/streamer/snapshot":
             self.send_response(200); self.send_header("Content-Type", "image/jpeg"); self.end_headers(); self.wfile.write(b"\xff\xd8JPEG"); return
@@ -83,6 +86,19 @@ check("config path secret", s.config_path_ok("/etc/kvmd/htpasswd") != "")
 check("config path escape", s.config_path_ok("/etc/kvmd/../shadow") != "")
 check("config path other", s.config_path_ok("/etc/fstab") != "")
 
+# ---- pipelines and 2FA
+for cmd, want in [
+    ('journalctl -u kvmd -n 40 --no-pager | grep -iE "auth|forbid" | tail -15', "read"),
+    ("uptime; reboot", "destructive"), ("uptime | tail && reboot", "destructive"),
+    ("uptime || reboot", "destructive"), ("cat /etc/kvmd/override.yaml > /tmp/x", "change"),
+    ('grep "a`reboot`" /etc/kvmd/override.yaml', "destructive"), ("uptime | (reboot)", "destructive"),
+    ("kvmd -m | grep -A10 auth:", "read"), ('ls "/etc/kvmd"', "read"),
+]:
+    got = s.classify_ssh(cmd)
+    check(f"pipeline {cmd!r} -> {want}" + ("" if got == want else f" (got {got})"), got == want)
+check("totp matches RFC 6238 test vector", s._totp("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", now=59) == "287082")
+check("totp spaces and lowercase ok", s._totp("gezd gnbv gy3t qojq gezd gnbv gy3t qojq", now=59) == "287082")
+
 # ---- single server
 a, ua = serve("A")
 os.environ.update(PIKVM_URL=ua, PIKVM_PASSWORD="pwA")
@@ -143,6 +159,20 @@ os.environ.pop("PIKVM_PASSWORD", None)
 os.environ["PIKVM_PASSWORD_PI_KVM01"] = ""
 check("missing group password is an error, not a fallback", s.pikvm_info(server="pi-kvm01").startswith("ERROR"))
 os.environ["PIKVM_PASSWORD_PI_KVM01"] = "pwA"
+
+# ---- 2FA end to end
+c2, uc = serve("C")
+c2.expect_totp = True
+os.environ.update(PIKVM_SERVERS="tfa", PIKVM_URL_TFA=uc, PIKVM_PASSWORD_TFA="pwC")
+os.environ.pop("PIKVM_TOTP_SECRET_TFA", None)
+r = s.pikvm_info(server="tfa")
+check("no secret: login refused, hint mentions 2FA", "HTTP 403" in r or "HTTP 401" in r)
+check("hint mentions PIKVM_TOTP_SECRET", "PIKVM_TOTP_SECRET" in r)
+os.environ["PIKVM_TOTP_SECRET_TFA"] = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+r = s.pikvm_info(server="tfa")
+sent = {k.lower(): v for k, v in SEEN[-1][4].items()}["x-kvmd-passwd"]
+check("password plus 6 digit code sent", sent.startswith("pwC") and len(sent) == 9 and sent[3:].isdigit())
+os.environ.pop("PIKVM_TOTP_SECRET_TFA"); os.environ.update(PIKVM_SERVERS="pi-kvm01,thewall-pikvm")
 
 # ---- ssh layer (faked)
 calls = []

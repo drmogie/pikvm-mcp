@@ -74,7 +74,14 @@ The default PiKVM web login is `admin`. SSH is `root`. Use your own passwords.
 - `PIKVM_VERIFY_TLS`, `PIKVM_DOWNLOAD_DIR`
 - Several PiKVMs: `PIKVM_SERVERS`, then `PIKVM_URL_<NAME>`, `PIKVM_PASSWORD_<NAME>`, `PIKVM_SSH_PASSWORD_<NAME>`. `<NAME>` is the name in capitals with other characters turned into `_`.
 
-If the web login uses 2FA, add the 6 digit code after the password. That only works for a moment, so use a web account without 2FA for this tool.
+### 2FA
+
+If 2FA is on for the PiKVM web login (the file `/etc/kvmd/totp.secret` exists), the web API refuses the plain password with a 403 error. Two ways to fix it:
+
+- **Keep 2FA.** Set `PIKVM_TOTP_SECRET_<NAME>` to the secret. The tool makes the 6 digit code itself. To get the secret, SSH in and run `cat /etc/kvmd/totp.secret` yourself. This tool will not show it. Paste it only into the Claude desktop config.
+- **Turn 2FA off** for that PiKVM (`kvmd-totp del` over SSH, with the disk set writable). Only do this if you are happy with it.
+
+The PiKVM clock must be right, or the codes will not match.
 
 ## Not tested yet on real hardware
 

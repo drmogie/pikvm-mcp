@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pikvm-mcp"
-version = "2026.10.22.1"
+version = "2026.10.22.2"
 description = "MCP tool that lets Claude look at and configure PiKVMs, through the web API and SSH."
 readme = "README.md"
 requires-python = ">=3.10"

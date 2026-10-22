@@ -13,6 +13,7 @@ One PiKVM:
   PIKVM_USER              Web user. Default: admin
   PIKVM_PASSWORD          Web password                                (required)
   PIKVM_VERIFY_TLS        "true" to check the certificate. Default: false (PiKVM is self-signed)
+  PIKVM_TOTP_SECRET       2FA secret, only if 2FA is on for the web login (base32)
   PIKVM_SSH_HOST          Default: the host in PIKVM_URL
   PIKVM_SSH_PORT          Default: 22
   PIKVM_SSH_USER          Default: root
@@ -28,13 +29,18 @@ Several PiKVMs in one tool. Set these instead of PIKVM_URL and PIKVM_PASSWORD:
   PIKVM_USER_<NAME>           Optional web user
   PIKVM_PASSWORD_<NAME>       One web password per PiKVM
   PIKVM_SSH_PASSWORD_<NAME>   One SSH password per PiKVM (not needed with a key)
+  PIKVM_TOTP_SECRET_<NAME>    Optional. The 2FA secret for that PiKVM.
   PIKVM_SSH_HOST_<NAME>, PIKVM_SSH_PORT_<NAME>, PIKVM_SSH_USER_<NAME>,
   PIKVM_VERIFY_TLS_<NAME>     Optional per-PiKVM overrides.
 """
 
 from __future__ import annotations
 
+import base64
 import difflib
+import hashlib
+import hmac
+import struct
 import json
 import os
 import posixpath
@@ -50,7 +56,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP, Image
 
-__version__ = "2026.10.22.01"
+__version__ = "2026.10.22.02"
 
 mcp = FastMCP("pikvm")
 
@@ -87,15 +93,15 @@ SECRET_RE = re.compile(
     r"(htpasswd|ipmipasswd|vncpasswd|passwd|shadow|totp|secret|id_rsa|id_ed25519|"
     r"authorized_keys|\.key\b|\.pem\b|credentials)", re.I)
 
-SSH_META_RE = re.compile(r"[;&`><]|\$\(|\n|\r")
+SSH_META_RE = re.compile(r"`|\$\(|\n|\r")  # run inside quotes too, so always refused for the read level
 SSH_FILTERS = {"head", "tail", "grep", "wc", "sort", "uniq", "cut"}
 SSH_PLAIN_READ = {"uptime", "df", "free", "uname", "lsblk", "lsusb", "id", "whoami", "ls"}
 SSH_DESTRUCTIVE_RE = re.compile(
-    r"(^|[\s|])(rm|rmdir|mv|cp|dd|mkfs\S*|fdisk|parted|reboot|poweroff|shutdown|halt|"
+    r"(^|[\s|;&(`$])(rm|rmdir|mv|cp|dd|mkfs\S*|fdisk|parted|reboot|poweroff|shutdown|halt|"
     r"passwd|kvmd-htpasswd|kvmd-totp|pikvm-update|pacman|pip|pip3|swapoff|iptables|nft|"
     r"chmod|chown|truncate|tee|umount|kill|killall|pkill|curl|wget|sh|bash|python3?|"
     r"eval|sed|mount|date|hostnamectl|timedatectl|"
-    r"systemctl\s+(stop|disable|mask|poweroff|reboot|halt|kexec))(\s|$)")
+    r"systemctl\s+(stop|disable|mask|poweroff|reboot|halt|kexec))([\s;&)|`]|$)")
 CAT_OK_PREFIXES = ("/etc/kvmd/", "/proc/", "/sys/class/thermal/")
 CAT_OK_FILES = {"/boot/config.txt", "/boot/cmdline.txt", "/etc/os-release", "/etc/hostname"}
 SYSTEMCTL_READ = {"status", "is-active", "is-enabled", "is-failed", "list-units",
@@ -145,6 +151,28 @@ def _argv_is_read(argv: list[str]) -> bool:
     return False
 
 
+def _read_pipeline(cmd: str) -> list[list[str]]:
+    """Split a command into pipeline parts. Empty list if it uses anything but plain pipes.
+    A | inside quotes is just text, so grep "a|b" is fine."""
+    if SSH_META_RE.search(cmd):
+        return []
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars="|;&<>()")
+        lex.whitespace_split = True
+        tokens = list(lex)
+    except ValueError:
+        return []
+    parts: list[list[str]] = [[]]
+    for tok in tokens:
+        if tok == "|":
+            parts.append([])
+        elif re.fullmatch(r"[|;&<>()]+", tok):
+            return []
+        else:
+            parts[-1].append(tok)
+    return parts if all(parts) else []
+
+
 def classify_ssh(cmd: str) -> str:
     """Returns read, change, destructive or blocked."""
     cmd = cmd.strip()
@@ -152,15 +180,9 @@ def classify_ssh(cmd: str) -> str:
         return "blocked"
     if SECRET_RE.search(cmd):
         return "blocked"
-    if not SSH_META_RE.search(cmd):
-        segments = [s.strip() for s in cmd.split("|")]
-        try:
-            argvs = [shlex.split(s) for s in segments]
-        except ValueError:
-            argvs = []
-        if argvs and all(argvs) and _argv_is_read(argvs[0]) \
-                and all(a[0] in SSH_FILTERS for a in argvs[1:]):
-            return "read"
+    argvs = _read_pipeline(cmd)
+    if argvs and _argv_is_read(argvs[0]) and all(a[0] in SSH_FILTERS for a in argvs[1:]):
+        return "read"
     if SSH_DESTRUCTIVE_RE.search(cmd):
         return "destructive"
     return "change"
@@ -301,6 +323,15 @@ def _download_dir() -> Path:
 # Web API
 # ---------------------------------------------------------------------------
 
+def _totp(secret: str, now: float | None = None) -> str:
+    """The current 6 digit 2FA code for a base32 secret (standard TOTP, 30 seconds)."""
+    key = base64.b32decode(re.sub(r"[\s-]", "", secret).upper() + "=" * (-len(re.sub(r"[\s-]", "", secret)) % 8))
+    counter = int((time.time() if now is None else now) // 30)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    off = digest[-1] & 0x0F
+    return f"{(struct.unpack('>I', digest[off:off + 4])[0] & 0x7FFFFFFF) % 1000000:06d}"
+
+
 def _request(method: str, path: str, params: dict[str, Any] | None = None,
              server: str = DEFAULT_SERVER, body: bytes | None = None,
              timeout: int = 30, raw: bool = False) -> dict[str, Any]:
@@ -312,7 +343,14 @@ def _request(method: str, path: str, params: dict[str, Any] | None = None,
     query = {k: v for k, v in ((k, _to_param(v)) for k, v in (params or {}).items())
              if v is not None}
     url = base + path + ("?" + urllib.parse.urlencode(query) if query else "")
-    headers = {"X-KVMD-User": user, "X-KVMD-Passwd": password}
+    login_password = password
+    totp_secret = _secret(server, "PIKVM_TOTP_SECRET")
+    if totp_secret:
+        try:
+            login_password = password + _totp(totp_secret)
+        except ValueError:
+            return {"ok": False, "error": "PIKVM_TOTP_SECRET is not a valid base32 secret."}
+    headers = {"X-KVMD-User": user, "X-KVMD-Passwd": login_password}
     if body is not None:
         headers["Content-Type"] = "text/plain; charset=utf-8"
     ctx = None
@@ -326,13 +364,13 @@ def _request(method: str, path: str, params: dict[str, Any] | None = None,
             payload = resp.read()
             ctype = resp.headers.get("Content-Type", "")
     except urllib.error.HTTPError as exc:
-        text = _scrub(exc.read().decode("utf-8", "replace")[:500], password)
+        text = _scrub(exc.read().decode("utf-8", "replace")[:500], password, login_password, totp_secret)
         hint = ""
-        if exc.code == 401:
-            hint = " The web user or password is wrong (or 2FA is on: add the 6 digit code after the password)."
+        if exc.code in (401, 403):
+            hint = " The web user or password is wrong (if you renamed the web user, set PIKVM_USER or PIKVM_USER_<NAME>), or 2FA is on (then set PIKVM_TOTP_SECRET, see the README)."
         return {"ok": False, "error": f"HTTP {exc.code} from PiKVM.{hint} {text}".strip()}
     except urllib.error.URLError as exc:
-        return {"ok": False, "error": _scrub(f"Could not reach PiKVM: {exc.reason}", password)}
+        return {"ok": False, "error": _scrub(f"Could not reach PiKVM: {exc.reason}", password, login_password, totp_secret)}
     except TimeoutError:
         return {"ok": False, "error": f"PiKVM did not answer within {timeout} seconds."}
     if raw:
@@ -344,7 +382,7 @@ def _request(method: str, path: str, params: dict[str, Any] | None = None,
     if isinstance(doc, dict) and doc.get("ok") is False:
         res = doc.get("result", {})
         msg = res.get("error_msg") or res.get("error") or doc
-        return {"ok": False, "error": _scrub(f"PiKVM says: {msg}", password)}
+        return {"ok": False, "error": _scrub(f"PiKVM says: {msg}", password, login_password, totp_secret)}
     return {"ok": True, "data": doc.get("result", doc) if isinstance(doc, dict) else doc}
 
 
