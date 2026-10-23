@@ -74,3 +74,32 @@ Tool gaps found (ideas for the next release, ask Mogie first):
 - Wider read-only allowlist (see the changelog). `FIND_BAD` lists the find options that are never a read. `CAT_READ_ONLY_FILES` holds files that `cat` may show but the config tools must not touch.
 - Tests: 136 checks in tests/test_server.py plus tests/test_ssh_write.py, all pass. Run them with a venv that has `mcp` and `paramiko`, using `python -I`.
 - Next ideas: pikvm_service doing rw and ro itself and accepting several units; a short wait or "reboot and wait" helper.
+
+## 2026-10-22 (evening): pi-kvm01 shares its network with the connected PC
+
+Config on the device only. No code change, no release.
+
+- Ask: "set it where the NIC is used to provide network to the connected PC." Mogie then said: eth0 goes to a PC that is being serviced, Wi-Fi is how pi-kvm01 gets internet, and USB networking may or may not work (a test for when a PC is on).
+- Uplink: wlan0 (172.16.10.29). eth0 had no cable and is now the port for the PC, so pi-kvm01 is no longer reachable by cable on the LAN. Wi-Fi is the only way in.
+- eth0: /etc/systemd/network/eth0.network now has static 172.31.31.1/24, `DHCPServer=yes` (pool 172.31.31.10 to 109, DNS 1.1.1.1 and 1.0.0.1) and `IPMasquerade=ipv4`. This is systemd-networkd's own DHCP server and NAT. No dnsmasq needed. The old file is kept as eth0.network.bak-20261022 (networkd ignores it).
+- Applied with `networkctl reload` then `networkctl reconfigure eth0`. wlan0 stayed up. With no cable, eth0 sits at "no-carrier (configuring)" and the address and NAT rules appear when a cable is plugged in.
+- networkd logged: IPMasquerade turns on global IPv6 forwarding, which can affect IPv6 router adverts on wlan0. IPv4 is not affected. Not chased.
+- USB network (rndis) kept on as a second path. It uses 172.30.30.0/24 with `otgnet.firewall.forward_iface: wlan0` and DNS 1.1.1.1 and 1.0.0.1 (`otgnet.commands.post_start_cmd_append: --dhcp-option=6,...`). Docs: https://docs.pikvm.org/usb_ethernet . Restarting only `kvmd-otgnet` applied it (log shows NAT, forwarding and DHCP); the docs say reboot. override.yaml backup: override.yaml.bak-20261022192337.
+- Ranges in use: LAN 172.16.x, USB 172.30.30.0/24, eth0 172.31.31.0/24. No overlap.
+- usb0 showed DOWN with no host link. The PC side may need its RNDIS adapter enabled. Not tested.
+- Open: the PC on eth0 can reach the PiKVM web page and SSH at 172.31.31.1 (passwords still needed). A firewall rule for eth0 can block that if wanted.
+- Not tested: a real PC on eth0 (DHCP, NAT, internet). Test when the PC is on.
+- Rebooted pi-kvm01 to make it all persistent.
+- pi-kvm01 has logged undervoltage in the past (throttle flags past=true). Watch the power supply while it carries traffic.
+
+## 2026-10-22 (night): live test round on pi-kvm01 with the Pi 5 target
+
+All passed. No code change, no release.
+
+- Screenshot works (Pi desktop, 1280x720 at 60 fps).
+- Keyboard works. A NumLock press turned the host LED on. It was toggled back after.
+- USB network works. The Pi 5 got a lease (172.30.30.22) from pi-kvm01.
+- Internet works over USB through pi-kvm01's Wi-Fi: gateway ping, by address, by name, and a ping forced over usb0 (about 20 ms).
+- ISO attach already passed on pi-kvm01 and thevm01.
+- Still untested: eth0 sharing with a cabled PC, local keyboard and mouse hotkeys on the three Linux boxes, a mouse click test, ISO attach on thewall and thevm02.
+- To-do for Mogie: remove the broad star NFS rule on the Synology if it is still there.
